@@ -1,0 +1,18 @@
+[Unit]
+Description=Inverter Dashboard (Flask)
+After=network.target inverter-reader.service
+Wants=inverter-reader.service
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__HOME__/inverter-monitoring
+ExecStart=/usr/bin/python3 __HOME__/inverter-monitoring/dashboard.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=append:__HOME__/inverter-monitoring/dashboard.log
+StandardError=append:__HOME__/inverter-monitoring/dashboard.log
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
