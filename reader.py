@@ -14,7 +14,7 @@ PROTOCOL DISCOVERY NOTES (confirmed via brute-force probing):
       f3: AC output load percentage (%)
       f4: unknown / PV input voltage (often 0)
       f5: battery charge current (A) — proxy for solar power
-      f6: battery voltage (V)
+      f6: battery voltage (V) — reported at 2x actual; divided by BAT_VOLTAGE_SCALE before use
       f7: 8-bit status flags (ASCII '0'/'1', MSB first)
              bit7=AC output active, remaining bits TBD
 
@@ -40,7 +40,7 @@ from config import (
     SERIAL_PORT, BAUD_RATE, SERIAL_TIMEOUT,
     POLL_INTERVAL, BATTERY_VOLTAGE_SOC,
     BAT_ABSORPTION_V, BAT_FLOAT_V,
-    INVERTER_RATED_VA, LOG_LEVEL
+    BAT_VOLTAGE_SCALE, INVERTER_RATED_VA, LOG_LEVEL
 )
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reader.log")
@@ -58,14 +58,26 @@ logger = logging.getLogger("reader")
 
 # Battery utilities
 
-def voltage_to_soc(volts: float) -> float:
+def voltage_to_soc(volts: float, stage: str) -> float:
     """
-    Interpolate SoC % from battery voltage using the configured discharge curve.
-    If voltage is above absorption threshold the battery is in charging mode
-    and we cap SoC at 100%.
+    Estimate SoC % from battery voltage.
+
+    The voltage curve is only reliable when the battery is resting under
+    discharge. During charging the charger pushes voltage above the real
+    resting level, so we return a stage-based estimate instead:
+      Float       -> 95%  (battery is full, charger is just maintaining it)
+      Absorption  -> 85%  (battery is nearly full, current tapering off)
+      Bulk        -> 50%  (battery still climbing, real SoC unknown)
+    Only in Discharge do we interpolate from the resting voltage curve.
     """
-    if volts >= BAT_ABSORPTION_V:
-        return 100.0
+    if stage == "Float":
+        return 95.0
+    if stage == "Absorption":
+        return 85.0
+    if stage == "Bulk":
+        return 50.0
+
+    # Discharge: voltage curve is valid here
     points = BATTERY_VOLTAGE_SOC
     if volts <= points[0][0]:
         return 0.0
@@ -119,16 +131,16 @@ def parse_q1(raw: bytes) -> dict | None:
         ac_v       = float(parts[2])
         load_pct   = float(parts[3])
         # parts[4] = pv voltage (often 0)
-        charge_a   = float(parts[5])   # battery charge current (A)
-        bat_v      = float(parts[6])
+        charge_a   = float(parts[5])              # battery charge current (A)
+        bat_v      = float(parts[6]) / BAT_VOLTAGE_SCALE  # inverter doubles the voltage internally
         flags      = parts[7] if len(parts) > 7 else "00000000"
     except (ValueError, IndexError) as e:
         logger.warning("Q1 parse error: %s — %r", e, text[:60])
         return None
 
     grid_ok   = 1 if grid_v > 100.0 else 0
-    bat_soc   = voltage_to_soc(bat_v)
     bat_stage = infer_charge_stage(bat_v, charge_a)
+    bat_soc   = voltage_to_soc(bat_v, bat_stage)
 
     # Solar watts ≈ charge current × battery voltage.
     # This is the power being pushed into the battery; when batteries are full
