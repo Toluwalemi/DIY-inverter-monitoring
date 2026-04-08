@@ -58,26 +58,13 @@ logger = logging.getLogger("reader")
 
 # Battery utilities
 
-def voltage_to_soc(volts: float, stage: str) -> float:
+def voltage_to_soc(volts: float) -> float:
     """
-    Estimate SoC % from battery voltage.
-
-    The voltage curve is only reliable when the battery is resting under
-    discharge. During charging the charger pushes voltage above the real
-    resting level, so we return a stage-based estimate instead:
-      Float       -> 95%  (battery is full, charger is just maintaining it)
-      Absorption  -> 85%  (battery is nearly full, current tapering off)
-      Bulk        -> 50%  (battery still climbing, real SoC unknown)
-    Only in Discharge do we interpolate from the resting voltage curve.
+    Interpolate SoC % from battery voltage using the resting discharge curve.
+    This is most accurate when the battery is not actively being charged.
+    When voltage is above the top of the curve the battery is full (100%).
+    When below the bottom it is empty (0%).
     """
-    if stage == "Float":
-        return 95.0
-    if stage == "Absorption":
-        return 85.0
-    if stage == "Bulk":
-        return 50.0
-
-    # Discharge: voltage curve is valid here
     points = BATTERY_VOLTAGE_SOC
     if volts <= points[0][0]:
         return 0.0
@@ -92,13 +79,17 @@ def voltage_to_soc(volts: float, stage: str) -> float:
     return 0.0
 
 
-def infer_charge_stage(bat_v: float, charge_current: float) -> str:
+def infer_charge_stage(bat_v: float) -> str:
+    """
+    Determine battery stage from voltage alone.
+    Field 5 in the Q1 response is not solar current — it stays non-zero
+    at night and does not correlate with solar production, so it cannot
+    be used to detect charging. Voltage thresholds are the only reliable signal.
+    """
     if bat_v >= BAT_ABSORPTION_V:
         return "Absorption"
     if bat_v >= BAT_FLOAT_V:
         return "Float"
-    if charge_current and charge_current > 0.1:
-        return "Bulk"
     return "Discharge"
 
 
@@ -126,32 +117,31 @@ def parse_q1(raw: bytes) -> dict | None:
         return None
 
     try:
-        grid_v     = float(parts[0])
+        grid_v   = float(parts[0])
         # parts[1] = grid frequency
-        ac_v       = float(parts[2])
-        load_pct   = float(parts[3])
-        # parts[4] = pv voltage (often 0)
-        charge_a   = float(parts[5])              # battery charge current (A)
-        bat_v      = float(parts[6]) / BAT_VOLTAGE_SCALE  # inverter doubles the voltage internally
-        flags      = parts[7] if len(parts) > 7 else "00000000"
+        # parts[2] = AC output voltage
+        load_pct = float(parts[3])
+        # parts[4] = unknown
+        # parts[5] = unknown field — not solar current (stays non-zero at night)
+        bat_v    = float(parts[6]) / BAT_VOLTAGE_SCALE
+        flags    = parts[7] if len(parts) > 7 else "00000000"
     except (ValueError, IndexError) as e:
         logger.warning("Q1 parse error: %s — %r", e, text[:60])
         return None
 
     grid_ok   = 1 if grid_v > 100.0 else 0
-    bat_stage = infer_charge_stage(bat_v, charge_a)
-    bat_soc   = voltage_to_soc(bat_v, bat_stage)
+    bat_stage = infer_charge_stage(bat_v)
+    bat_soc   = voltage_to_soc(bat_v)
 
-    # Solar watts ≈ charge current × battery voltage.
-    # This is the power being pushed into the battery; when batteries are full
-    # (Float) the charger throttles down so this underestimates peak solar.
-    # It is still the best proxy without a dedicated PV command.
-    solar_w = round(charge_a * bat_v, 1) if charge_a > 0 else 0.0
+    # Solar production cannot be reliably derived from the Q1 protocol.
+    # Field 5 was initially assumed to be charge current but does not drop
+    # to zero at night, so it is not solar current. Stored as None for now.
+    solar_w = None
 
-    # Load watts from % × rated VA (approximate)
-    load_va  = round(load_pct / 100.0 * INVERTER_RATED_VA, 0)
-    # Assume ~0.8 PF for resistive/mixed loads
-    load_w   = round(load_va * 0.8, 0)
+    # Load watts estimated from load percentage and rated inverter capacity.
+    # Assumes 0.8 power factor for mixed loads.
+    load_va = round(load_pct / 100.0 * INVERTER_RATED_VA, 0)
+    load_w  = round(load_va * 0.8, 0)
 
     return {
         "grid_ok":   grid_ok,
