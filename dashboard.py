@@ -121,7 +121,7 @@ HTML = """<!DOCTYPE html>
     <span class="v" id="last-ts">--</span>
   </div>
 
-  <div class="footer">Auto-refreshing every 10s &bull; Simba/Talegent 5KVA 48V</div>
+  <div class="footer">Auto-refreshing every 10s &bull; Simba/Talegent 3kVA 24V</div>
 
 <script>
 function fmt(v, unit, decimals=0) {

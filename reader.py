@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Inverter serial reader — Simba/Talegent 5KVA 48V.
+Inverter serial reader — Simba/Talegent 3kVA 24V.
 
 PROTOCOL DISCOVERY NOTES (confirmed via brute-force probing):
   - Baud rate: 2400, 8N1  (only rate that responds)
@@ -81,10 +81,10 @@ def voltage_to_soc(volts: float) -> float:
 
 
 def infer_charge_stage(bat_v: float, charge_current: float) -> str:
-    if bat_v >= BAT_FLOAT_V:
-        return "Float"
     if bat_v >= BAT_ABSORPTION_V:
         return "Absorption"
+    if bat_v >= BAT_FLOAT_V:
+        return "Float"
     if charge_current and charge_current > 0.1:
         return "Bulk"
     return "Discharge"

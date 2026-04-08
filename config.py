@@ -16,23 +16,23 @@ DASHBOARD_PORT = 5000
 DASHBOARD_HOST = "0.0.0.0"
 
 # Inverter rated capacity (VA) — used to estimate load watts from load %
-INVERTER_RATED_VA = int(os.getenv("INVERTER_VA", "5000"))
+INVERTER_RATED_VA = int(os.getenv("INVERTER_VA", "3000"))
 
-# Battery voltage → SoC % mapping for FLD 12V 200Ah x4 (48V bank)
+# Battery voltage -> SoC % mapping for FLD 12V x2 in series (24V bank)
 # These are RESTING / DISCHARGE voltages (open circuit approximations).
 # During charging the voltage is artificially elevated by the charger.
 BATTERY_VOLTAGE_SOC = [
-    (46.4, 0),
-    (48.0, 25),
-    (49.6, 50),
-    (51.2, 75),
-    (52.8, 100),
+    (21.0, 0),
+    (23.0, 25),
+    (24.0, 50),
+    (26.0, 75),
+    (27.6, 100),
 ]
 
 # When battery voltage exceeds this, it is in charging mode (Absorption/Float).
 # SoC is capped at 100% and the stage is inferred from voltage.
-BAT_ABSORPTION_V = 53.5   # V — anything above this is absorption/float charging
-BAT_FLOAT_V      = 54.8   # V — float (trickle) charge threshold
+BAT_ABSORPTION_V = 29.0   # V — constant-voltage/absorption region for 24V FLD bank
+BAT_FLOAT_V      = 27.0   # V — float (trickle) charge threshold
 
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

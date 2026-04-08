@@ -5,7 +5,7 @@ It reads inverter data over RS232, stores time-series data in SQLite, and serves
 
 ## Current Hardware Setup
 
-- **Inverter:** Simba/Talegent, RS232 @ 2400 baud, firmware `R1.4.018`
+- **Inverter:** Simba/Talegent 3kVA/2.4kW, RS232 @ 2400 baud, firmware `R1.4.018`
 - **Battery bank:** 24V flooded lead-acid (2 × 220Ah in series)
 - **Solar:** 4 × 650W panels installed (note inverter PV input limit is 1200W)
 - **Controller host:** Raspberry Pi 3B+ (`/dev/ttyUSB0` via CH340 USB-RS232 cable)
