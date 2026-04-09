@@ -21,9 +21,16 @@ INVERTER_RATED_VA = int(os.getenv("INVERTER_VA", "3000"))
 # The inverter reports battery voltage at a scaled value internally.
 # Calibrated by comparing raw Q1 field 6 against a multimeter reading:
 #   raw=53.0V, actual measured=24.2V -> scale = 53.0 / 24.2 = 2.19
-# To recalibrate: measure battery voltage with a multimeter, read raw Q1
-# field 6 from reader.py --probe, then set scale = raw / measured.
-BAT_VOLTAGE_SCALE = 2.19
+# To recalibrate: measure battery voltage with a multimeter or inverter panel,
+# read raw Q1 field 6 from reader.py --probe, then set scale = raw / measured.
+BAT_VOLTAGE_SCALE = float(os.getenv("BAT_VOLTAGE_SCALE", "2.19"))
+
+# Adaptive battery scaling uses a secondary reading (from F command when present)
+# to keep voltage alignment close over time without hardcoding one-time values.
+BAT_SCALE_ADAPTIVE = os.getenv("BAT_SCALE_ADAPTIVE", "0") == "1"
+BAT_SCALE_ALPHA = float(os.getenv("BAT_SCALE_ALPHA", "0.05"))
+BAT_SCALE_MIN = float(os.getenv("BAT_SCALE_MIN", "1.5"))
+BAT_SCALE_MAX = float(os.getenv("BAT_SCALE_MAX", "3.0"))
 
 # Battery voltage -> SoC % mapping for FLD 12V x2 in series (24V bank)
 # These are RESTING / DISCHARGE voltages (open circuit approximations).

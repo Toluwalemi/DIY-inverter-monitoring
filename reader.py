@@ -29,6 +29,7 @@ Run with --probe to dump raw discovery output.
 import os
 import sys
 import time
+import re
 import logging
 import argparse
 from datetime import date
@@ -40,7 +41,9 @@ from config import (
     SERIAL_PORT, BAUD_RATE, SERIAL_TIMEOUT,
     POLL_INTERVAL, BATTERY_VOLTAGE_SOC,
     BAT_ABSORPTION_V, BAT_FLOAT_V,
-    BAT_VOLTAGE_SCALE, INVERTER_RATED_VA, LOG_LEVEL,
+    BAT_VOLTAGE_SCALE, BAT_SCALE_ADAPTIVE, BAT_SCALE_ALPHA,
+    BAT_SCALE_MIN, BAT_SCALE_MAX, PV_MIN_VOLTAGE,
+    INVERTER_RATED_VA, LOG_LEVEL,
 )
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reader.log")
@@ -95,7 +98,7 @@ def infer_charge_stage(bat_v: float) -> str:
 
 # Q1 response parser
 
-def parse_q1(raw: bytes) -> dict | None:
+def parse_q1(raw: bytes, effective_bat_scale: float) -> dict | None:
     """
     Parse the Q1\r response from the inverter.
 
@@ -123,7 +126,8 @@ def parse_q1(raw: bytes) -> dict | None:
         load_pct = float(parts[3])
         pv_v     = float(parts[4])   # PV input voltage (V); 0 at night
         charge_a = float(parts[5])   # battery charge current (A); stays non-zero at night
-        bat_v    = float(parts[6]) / BAT_VOLTAGE_SCALE
+        raw_bat_v = float(parts[6])
+        bat_v    = raw_bat_v / effective_bat_scale
         flags    = parts[7] if len(parts) > 7 else "00000000"
     except (ValueError, IndexError) as e:
         logger.warning("Q1 parse error: %s — %r", e, text[:60])
@@ -154,8 +158,76 @@ def parse_q1(raw: bytes) -> dict | None:
         "load_w":    load_w,
         "load_va":   load_va,
         "load_pct":  load_pct,
+        "charge_a":  charge_a,
+        "raw_bat_v": raw_bat_v,
         "raw_line":  text[:500],
     }
+
+
+def parse_f(raw: bytes) -> dict | None:
+    """
+    Parse F\\r response: #ac_v load_pct field2 freq
+    field2 meaning varies by inverter variant; keep generic and infer later.
+    """
+    try:
+        text = raw.decode("ascii", errors="replace").strip()
+    except Exception:
+        return None
+
+    if not text.startswith("#"):
+        return None
+
+    parts = text[1:].split()
+    if len(parts) < 4:
+        return None
+
+    try:
+        ac_v = float(parts[0])
+        load_pct = float(parts[1])
+        field2 = float(parts[2])
+        freq = float(parts[3])
+    except (ValueError, IndexError):
+        return None
+
+    return {
+        "ac_v": ac_v,
+        "load_pct": load_pct,
+        "field2": field2,
+        "freq": freq,
+        "raw_line": text[:500],
+    }
+
+
+def parse_p5(raw: bytes, bat_v: float) -> dict | None:
+    """
+    Parse optional P5\\r response heuristically.
+    Expected to contain PV metrics on some inverter variants.
+    """
+    try:
+        text = raw.decode("ascii", errors="replace").strip()
+    except Exception:
+        return None
+    if not text or text in ("NAK", "ACK"):
+        return None
+
+    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
+    if not nums:
+        return None
+
+    pv_v = None
+    solar_w = None
+    for n in nums:
+        if n > max(PV_MIN_VOLTAGE, bat_v * 1.5):
+            pv_v = n
+            break
+    for n in nums:
+        if 10 <= n <= 5000 and (pv_v is None or abs(n - pv_v) > 1):
+            solar_w = n
+            break
+
+    if pv_v is None and solar_w is None:
+        return None
+    return {"pv_v": pv_v, "solar_w": solar_w, "raw_line": text[:500]}
 
 
 # Serial helpers
@@ -186,7 +258,12 @@ def send_command(ser: serial.Serial, cmd: bytes) -> bytes:
             if b'\r' in buf:
                 break
         time.sleep(0.05)
-    return bytes(buf)
+    if not buf:
+        return b""
+    # Keep only the first complete frame in case multiple replies arrive
+    # in one read burst (e.g., back-to-back Q1/F polling).
+    frame, *_ = bytes(buf).split(b'\r', 1)
+    return frame + b'\r'
 
 
 # Probe mode
@@ -240,6 +317,7 @@ def run_loop():
     database.init_db()
     ser = None
     consecutive_errors = 0
+    effective_bat_scale = BAT_VOLTAGE_SCALE
 
     while True:
         try:
@@ -248,6 +326,8 @@ def run_loop():
                 consecutive_errors = 0
 
             raw = send_command(ser, b'Q1\r')
+            raw_f = send_command(ser, b'F\r')
+            raw_p5 = send_command(ser, b'P5\r')
 
             if not raw:
                 logger.debug("No data from inverter")
@@ -260,11 +340,53 @@ def run_loop():
                 time.sleep(POLL_INTERVAL)
                 continue
 
-            data = parse_q1(raw)
-            if data is None:
+            f_data = parse_f(raw_f) if raw_f else None
+            q1_data = parse_q1(raw, effective_bat_scale)
+            if q1_data is None:
                 logger.warning("Parse failed: %r", raw[:60])
                 time.sleep(POLL_INTERVAL)
                 continue
+
+            # Adaptive battery scale: use F field2 as a secondary battery reading
+            # only when it looks like a plausible 24V battery voltage.
+            if BAT_SCALE_ADAPTIVE and f_data:
+                f_field2 = f_data.get("field2")
+                if (
+                    18.0 <= f_field2 <= 32.0
+                    and q1_data.get("raw_bat_v")
+                    and abs(f_field2 - (q1_data.get("bat_v") or 0)) <= 1.0
+                ):
+                    target_scale = q1_data["raw_bat_v"] / f_field2
+                    if BAT_SCALE_MIN <= target_scale <= BAT_SCALE_MAX:
+                        alpha = max(0.0, min(BAT_SCALE_ALPHA, 1.0))
+                        effective_bat_scale = ((1 - alpha) * effective_bat_scale) + (alpha * target_scale)
+                        q1_data["bat_v"] = q1_data["raw_bat_v"] / effective_bat_scale
+                        q1_data["bat_soc"] = voltage_to_soc(q1_data["bat_v"])
+                        q1_data["bat_stage"] = infer_charge_stage(q1_data["bat_v"])
+
+            # PV voltage fallback: Q1 field4 is often 0; infer from F field2
+            # when it clearly exceeds battery range (common in PV strings).
+            pv_v = q1_data.get("pv_v")
+            if (pv_v is None or pv_v <= 0) and f_data:
+                f_field2 = f_data.get("field2")
+                if f_field2 and f_field2 > max(PV_MIN_VOLTAGE, (q1_data.get("bat_v") or 0) * 1.5):
+                    q1_data["pv_v"] = f_field2
+
+            # Optional panel command fallback (if supported by this inverter).
+            p5_data = parse_p5(raw_p5, q1_data.get("bat_v") or 0) if raw_p5 else None
+            if p5_data:
+                if p5_data.get("pv_v"):
+                    q1_data["pv_v"] = p5_data["pv_v"]
+                if p5_data.get("solar_w"):
+                    q1_data["solar_w"] = round(p5_data["solar_w"], 0)
+
+            # Keep solar estimate dynamic from live telemetry only.
+            charge_a = q1_data.get("charge_a") or 0
+            bat_v = q1_data.get("bat_v") or 0
+            if q1_data.get("solar_w") is None:
+                q1_data["solar_w"] = round(charge_a * bat_v, 0) if charge_a > 0 else None
+
+            data = q1_data
 
             database.insert_reading(data)
 

@@ -179,3 +179,6 @@ inverter.db
 # Exclude the generated .service files (they contain your username and home path).
 # The .service.template files are committed instead — see install-services.sh.
 *.service
+
+# Local inverter manual
+simba-talegent-inverter.pdf
