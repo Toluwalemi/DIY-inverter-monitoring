@@ -12,9 +12,9 @@ PROTOCOL DISCOVERY NOTES (confirmed via brute-force probing):
       f1: grid input frequency (Hz) — 0 when grid is off
       f2: AC output voltage (V)
       f3: AC output load percentage (%)
-      f4: unknown / PV input voltage — always 0 on this unit, not usable
-      f5: battery charge current (A) — proxy for solar power
-      f6: battery voltage (V) — reported at 2x actual; divided by BAT_VOLTAGE_SCALE before use
+      f4: unknown / PV input voltage — often 0 on this unit
+      f5: battery current-like value (A), not reliable as direct PV power
+      f6: battery voltage-like field (scaled); secondary after F field2
       f7: 8-bit status flags (ASCII '0'/'1', MSB first)
              bit7=AC output active, remaining bits TBD
 
@@ -29,7 +29,6 @@ Run with --probe to dump raw discovery output.
 import os
 import sys
 import time
-import re
 import logging
 import argparse
 from datetime import date
@@ -198,38 +197,6 @@ def parse_f(raw: bytes) -> dict | None:
     }
 
 
-def parse_p5(raw: bytes, bat_v: float) -> dict | None:
-    """
-    Parse optional P5\\r response heuristically.
-    Expected to contain PV metrics on some inverter variants.
-    """
-    try:
-        text = raw.decode("ascii", errors="replace").strip()
-    except Exception:
-        return None
-    if not text or text in ("NAK", "ACK"):
-        return None
-
-    nums = [float(n) for n in re.findall(r"\d+(?:\.\d+)?", text)]
-    if not nums:
-        return None
-
-    pv_v = None
-    solar_w = None
-    for n in nums:
-        if n > max(PV_MIN_VOLTAGE, bat_v * 1.5):
-            pv_v = n
-            break
-    for n in nums:
-        if 10 <= n <= 5000 and (pv_v is None or abs(n - pv_v) > 1):
-            solar_w = n
-            break
-
-    if pv_v is None and solar_w is None:
-        return None
-    return {"pv_v": pv_v, "solar_w": solar_w, "raw_line": text[:500]}
-
-
 # Serial helpers
 
 def open_serial() -> serial.Serial:
@@ -327,7 +294,6 @@ def run_loop():
 
             raw = send_command(ser, b'Q1\r')
             raw_f = send_command(ser, b'F\r')
-            raw_p5 = send_command(ser, b'P5\r')
 
             if not raw:
                 logger.debug("No data from inverter")
@@ -347,6 +313,15 @@ def run_loop():
                 time.sleep(POLL_INTERVAL)
                 continue
 
+            # On this inverter, F field2 tracks panel battery voltage better
+            # than Q1 scaled battery field. Prefer it when in 24V range.
+            if f_data:
+                f_bat_v = f_data.get("field2")
+                if 18.0 <= f_bat_v <= 32.0:
+                    q1_data["bat_v"] = f_bat_v
+                    q1_data["bat_soc"] = voltage_to_soc(f_bat_v)
+                    q1_data["bat_stage"] = infer_charge_stage(f_bat_v)
+
             # Adaptive battery scale: use F field2 as a secondary battery reading
             # only when it looks like a plausible 24V battery voltage.
             if BAT_SCALE_ADAPTIVE and f_data:
@@ -364,27 +339,15 @@ def run_loop():
                         q1_data["bat_soc"] = voltage_to_soc(q1_data["bat_v"])
                         q1_data["bat_stage"] = infer_charge_stage(q1_data["bat_v"])
 
-            # PV voltage fallback: Q1 field4 is often 0; infer from F field2
-            # when it clearly exceeds battery range (common in PV strings).
-            pv_v = q1_data.get("pv_v")
-            if (pv_v is None or pv_v <= 0) and f_data:
-                f_field2 = f_data.get("field2")
-                if f_field2 and f_field2 > max(PV_MIN_VOLTAGE, (q1_data.get("bat_v") or 0) * 1.5):
-                    q1_data["pv_v"] = f_field2
-
-            # Optional panel command fallback (if supported by this inverter).
-            p5_data = parse_p5(raw_p5, q1_data.get("bat_v") or 0) if raw_p5 else None
-            if p5_data:
-                if p5_data.get("pv_v"):
-                    q1_data["pv_v"] = p5_data["pv_v"]
-                if p5_data.get("solar_w"):
-                    q1_data["solar_w"] = round(p5_data["solar_w"], 0)
-
             # Keep solar estimate dynamic from live telemetry only.
+            # If PV voltage signal is absent on this protocol variant, do not
+            # invent PV watts from battery current proxy.
             charge_a = q1_data.get("charge_a") or 0
             bat_v = q1_data.get("bat_v") or 0
-            if q1_data.get("solar_w") is None:
+            if q1_data.get("pv_v") and q1_data["pv_v"] >= PV_MIN_VOLTAGE:
                 q1_data["solar_w"] = round(charge_a * bat_v, 0) if charge_a > 0 else None
+            else:
+                q1_data["solar_w"] = None
 
             data = q1_data
 
