@@ -12,7 +12,7 @@ PROTOCOL DISCOVERY NOTES (confirmed via brute-force probing):
       f1: grid input frequency (Hz) — 0 when grid is off
       f2: AC output voltage (V)
       f3: AC output load percentage (%)
-      f4: unknown / PV input voltage (often 0)
+      f4: unknown / PV input voltage — always 0 on this unit, not usable
       f5: battery charge current (A) — proxy for solar power
       f6: battery voltage (V) — reported at 2x actual; divided by BAT_VOLTAGE_SCALE before use
       f7: 8-bit status flags (ASCII '0'/'1', MSB first)
@@ -40,7 +40,7 @@ from config import (
     SERIAL_PORT, BAUD_RATE, SERIAL_TIMEOUT,
     POLL_INTERVAL, BATTERY_VOLTAGE_SOC,
     BAT_ABSORPTION_V, BAT_FLOAT_V,
-    BAT_VOLTAGE_SCALE, INVERTER_RATED_VA, LOG_LEVEL
+    BAT_VOLTAGE_SCALE, INVERTER_RATED_VA, LOG_LEVEL,
 )
 
 LOG_FILE = os.path.join(os.path.dirname(os.path.abspath(__file__)), "reader.log")
@@ -121,8 +121,8 @@ def parse_q1(raw: bytes) -> dict | None:
         # parts[1] = grid frequency
         # parts[2] = AC output voltage
         load_pct = float(parts[3])
-        # parts[4] = unknown
-        # parts[5] = unknown field — not solar current (stays non-zero at night)
+        pv_v     = float(parts[4])   # PV input voltage (V); 0 at night
+        charge_a = float(parts[5])   # battery charge current (A); stays non-zero at night
         bat_v    = float(parts[6]) / BAT_VOLTAGE_SCALE
         flags    = parts[7] if len(parts) > 7 else "00000000"
     except (ValueError, IndexError) as e:
@@ -133,10 +133,11 @@ def parse_q1(raw: bytes) -> dict | None:
     bat_stage = infer_charge_stage(bat_v)
     bat_soc   = voltage_to_soc(bat_v)
 
-    # Solar production cannot be reliably derived from the Q1 protocol.
-    # Field 5 was initially assumed to be charge current but does not drop
-    # to zero at night, so it is not solar current. Stored as None for now.
-    solar_w = None
+    # Field 4 (pv_v) is always 0 on this inverter — it does not report PV voltage.
+    # Estimate solar charging power from charge current × battery voltage.
+    # This may overcount slightly at night (inverter draws a small standby current)
+    # but is the only available proxy for solar power on this protocol.
+    solar_w = round(charge_a * bat_v, 0) if charge_a > 0 else None
 
     # Load watts estimated from load percentage and rated inverter capacity.
     # Assumes 0.8 power factor for mixed loads.
@@ -146,6 +147,7 @@ def parse_q1(raw: bytes) -> dict | None:
     return {
         "grid_ok":   grid_ok,
         "solar_w":   solar_w,
+        "pv_v":      pv_v,
         "bat_v":     bat_v,
         "bat_soc":   bat_soc,
         "bat_stage": bat_stage,
@@ -271,6 +273,7 @@ def run_loop():
                 today,
                 data.get("solar_w") or 0,
                 data.get("grid_ok") or 0,
+                data.get("load_w") or 0,
                 POLL_INTERVAL,
             )
 

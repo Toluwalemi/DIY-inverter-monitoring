@@ -41,5 +41,9 @@ BATTERY_VOLTAGE_SOC = [
 BAT_ABSORPTION_V = 29.0   # V — constant-voltage/absorption region for 24V FLD bank
 BAT_FLOAT_V      = 27.0   # V — float (trickle) charge threshold
 
+# Minimum PV input voltage (V) to consider solar active.
+# Below this threshold it is night/overcast and solar_w is set to None.
+PV_MIN_VOLTAGE = float(os.getenv("PV_MIN_VOLTAGE", "10.0"))
+
 # Logging
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")

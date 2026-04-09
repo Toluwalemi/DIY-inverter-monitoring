@@ -176,6 +176,12 @@ HTML = """<!DOCTYPE html>
     <span class="v" id="solar-kwh2">--</span>
   </div>
   <div class="row-stat">
+    <span class="k label-help">Energy Consumed Today
+      <button class="help-icon" type="button" title="Estimated energy drawn by connected loads today, calculated from load % every 10 seconds." data-help="Estimated energy drawn by connected loads today, calculated from load % every 10 seconds.">i</button>
+    </span>
+    <span class="v" id="load-kwh">--</span>
+  </div>
+  <div class="row-stat">
     <span class="k label-help">Grid Availability Today
       <button class="help-icon" type="button" title="Total time utility/grid has been available today." data-help="Total time utility/grid has been available today.">i</button>
     </span>
@@ -218,9 +224,11 @@ function fetchData() {
 
       // Solar
       document.getElementById('solar-w').textContent = fmt(r.solar_w, 'W');
+      const pvV = (r.pv_v !== null && r.pv_v !== undefined) ? r.pv_v.toFixed(1) + 'V PV' : null;
       const kwh = s.solar_kwh ? s.solar_kwh.toFixed(2) + ' kWh today' : '-- kWh today';
-      document.getElementById('solar-kwh').textContent = kwh;
+      document.getElementById('solar-kwh').textContent = pvV ? kwh + '  ·  ' + pvV : kwh;
       document.getElementById('solar-kwh2').textContent = s.solar_kwh ? s.solar_kwh.toFixed(2) + ' kWh' : '--';
+      document.getElementById('load-kwh').textContent = s.load_kwh ? s.load_kwh.toFixed(2) + ' kWh' : '--';
 
       // Battery
       const soc = r.bat_soc;
